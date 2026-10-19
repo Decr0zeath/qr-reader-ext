@@ -1,6 +1,7 @@
-// Draws scan results over the page. background.js injects this file before
-// every scan, then calls the functions on `globalThis.qrReader`. It runs in
-// the extension's isolated world, so page scripts can't reach it.
+// Draws scan results over the page. background.js injects this file and then
+// calls the functions on `globalThis.qrReader`: show() for the results of a
+// click, mark() for auto-scan. It runs in the extension's isolated world, so
+// page scripts can't reach it.
 
 // Re-injecting replaces the previous instance, so an updated extension
 // never keeps running old overlay code in a tab that was open before.
@@ -8,6 +9,9 @@ globalThis.qrReader?.clear();
 
 globalThis.qrReader = (() => {
   const GAP = 8; // Space between a code and its card, and from the viewport edges.
+  // How far auto-scan brackets sit outside a code, so they don't stop the
+  // next screenshot from decoding it.
+  const BRACKET_OFFSET = 7;
   const STYLE = `
     * { box-sizing: border-box; }
     .layer, svg { position: absolute; inset: 0; }
@@ -15,6 +19,10 @@ globalThis.qrReader = (() => {
     .halo { fill: none; stroke: rgb(0 0 0 / 0.55); stroke-width: 6; stroke-linejoin: round; }
     .edge { fill: rgb(74 222 128 / 0.14); stroke: #4ade80; stroke-width: 3; stroke-linejoin: round; }
     .edge.active { fill: rgb(74 222 128 / 0.32); stroke-width: 5; }
+    .bracket, .edge.bracket.active { fill: none; stroke-linecap: round; }
+    .halo.bracket { stroke-width: 5; }
+    .edge.bracket { stroke-width: 2.5; }
+    .edge.bracket.active { stroke-width: 4; }
 
     .list {
       position: absolute;
@@ -57,7 +65,7 @@ globalThis.qrReader = (() => {
       text-transform: uppercase;
       color: #a1a1aa;
     }
-    .num, .tag {
+    .num, .tag, .chip {
       display: inline-grid;
       place-items: center;
       min-width: 18px;
@@ -68,7 +76,18 @@ globalThis.qrReader = (() => {
       color: #052e16;
       background: #4ade80;
     }
-    .tag { position: absolute; box-shadow: 0 0 0 2px rgb(0 0 0 / 0.55); }
+    .tag, .chip { position: absolute; box-shadow: 0 0 0 2px rgb(0 0 0 / 0.55); }
+    .chip {
+      height: 20px;
+      padding: 0 8px;
+      border: 0;
+      border-radius: 10px;
+      pointer-events: auto;
+      cursor: pointer;
+    }
+    .chip:hover { background: #86efac; }
+    .chip[aria-expanded="true"] { background: #f4f4f5; }
+    .chip:focus-visible { outline: 2px solid #4ade80; outline-offset: 2px; }
     .host { margin-top: 4px; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
     .url {
       margin-top: 2px;
@@ -144,13 +163,16 @@ globalThis.qrReader = (() => {
     .close:hover { color: #f4f4f5; background: rgb(255 255 255 / 0.16); }
 
     @media (prefers-reduced-motion: no-preference) {
-      .card, .bar, .tag, svg { animation: enter 0.16s ease-out; }
+      .card, .bar, .tag, .chip, svg { animation: enter 0.16s ease-out; }
       @keyframes enter { from { opacity: 0; transform: translateY(4px); } }
     }
+    /* Markers redrawn for codes already on screen shouldn't animate in again. */
+    .still, .still * { animation: none !important; }
   `;
 
-  // The scan currently on screen: its host element and a controller whose
-  // abort() removes every listener it added.
+  // What's on screen: its host element, its mode ("results" of a click or
+  // auto-scan "markers"), and a controller whose abort() removes every
+  // listener it added.
   let current = null;
 
   function teardown() {
@@ -170,7 +192,22 @@ globalThis.qrReader = (() => {
     });
   }
 
-  function mount() {
+  // Closing the results of a click by hand lets auto-scan, if it's on, put
+  // its markers back right away.
+  function dismiss() {
+    teardown();
+    globalThis.qrWatch?.refresh();
+  }
+
+  function showingResults() {
+    return current?.mode === "results";
+  }
+
+  function clearMarkers() {
+    if (current?.mode === "markers") teardown();
+  }
+
+  function mount(mode) {
     teardown();
     const host = document.createElement("qr-reader-overlay");
     host.setAttribute(
@@ -188,48 +225,37 @@ globalThis.qrReader = (() => {
     }
 
     const abort = new AbortController();
-    const { signal } = abort;
-    current = { host, root, abort };
-    addEventListener("keydown", (e) => e.key === "Escape" && teardown(), { capture: true, signal });
-    addEventListener("pointerdown", (e) => !e.composedPath().includes(host) && teardown(), {
-      capture: true,
-      signal,
-    });
+    current = { host, root, abort, mode };
     // The outlines are only valid for the layout they were measured against.
-    addEventListener("resize", teardown, { signal });
+    addEventListener("resize", teardown, { signal: abort.signal });
     return current;
   }
 
+  // Calls close() on Escape or on a click anywhere outside the overlay.
+  function dismissOn(scan, close) {
+    const { signal } = scan.abort;
+    addEventListener("keydown", (e) => e.key === "Escape" && close(), { capture: true, signal });
+    addEventListener("pointerdown", (e) => !e.composedPath().includes(scan.host) && close(), {
+      capture: true,
+      signal,
+    });
+  }
+
   function status(message, autoHideMs) {
-    const scan = mount();
+    const scan = mount("results");
+    dismissOn(scan, dismiss);
     scan.root.append(bar(message));
-    if (autoHideMs) setTimeout(() => current === scan && teardown(), autoHideMs);
+    if (autoHideMs) setTimeout(() => current === scan && dismiss(), autoHideMs);
   }
 
   function show(codes) {
     if (codes.length === 0) return status("No QR codes found", 2500);
 
-    const scan = mount();
+    const scan = mount("results");
+    dismissOn(scan, dismiss);
     const width = innerWidth;
     const height = innerHeight;
-    const items = codes
-      .map((code) => {
-        const points = code.corners.map(([x, y]) => [x * width, y * height]);
-        const xs = points.map(([x]) => x);
-        const ys = points.map(([, y]) => y);
-        const box = {
-          left: Math.min(...xs),
-          right: Math.max(...xs),
-          top: Math.min(...ys),
-          bottom: Math.max(...ys),
-        };
-        return { code, points, box };
-      })
-      // Number codes in reading order: by row, then left to right.
-      .sort((a, b) => {
-        const sameRow = Math.abs(a.box.top - b.box.top) < (a.box.bottom - a.box.top) / 2;
-        return sameRow ? a.box.left - b.box.left : a.box.top - b.box.top;
-      });
+    const items = layout(codes, width, height);
 
     const numbered = items.length > 1;
     const layer = el("div", { className: "layer" });
@@ -268,16 +294,8 @@ globalThis.qrReader = (() => {
     if (placeCards(items, width, height, [rect(summary), ...items.map(({ box }) => boxRect(box))])) {
       for (const item of items) item.card.style.visibility = "";
     } else {
-      // Not enough room to put every card beside its code: list them along
-      // the side of the screen that covers fewer codes.
-      const onLeft = items.filter(({ box }) => (box.left + box.right) / 2 < width / 2).length;
-      const side = onLeft > items.length / 2 ? "right" : "left";
-      const list = el("div", { className: `list ${side}` });
-      for (const item of items) {
-        item.card.removeAttribute("style");
-        list.append(item.card);
-      }
-      scan.root.append(list);
+      // Not enough room to put every card beside its code.
+      scan.root.append(sideList(items, width));
     }
 
     // Keep the outlines on their codes when the page scrolls.
@@ -288,6 +306,114 @@ globalThis.qrReader = (() => {
       () => (layer.style.transform = `translate(${startX - scrollX}px, ${startY - scrollY}px)`),
       { passive: true, signal: scan.abort.signal },
     );
+  }
+
+  // Auto-scan results: brackets around each code and a chip that opens its
+  // card. Unlike show(), it leaves the codes uncovered so the next screenshot
+  // can still read them, and it never replaces the results of a click.
+  // Returns true so background.js can tell the overlay is loaded.
+  function mark(codes) {
+    if (current?.mode === "results") return true;
+    const previous = current?.mode === "markers" ? current : null;
+    const signature = JSON.stringify(codes.map(({ text, corners }) => [text, corners]));
+    if (previous && !previous.moved && previous.signature === signature) return true;
+    if (codes.length === 0) {
+      teardown();
+      return true;
+    }
+
+    const scan = mount("markers");
+    const texts = codes.map(({ text }) => text).sort().join("\n");
+    Object.assign(scan, { signature, texts, moved: false, open: null });
+    const width = innerWidth;
+    const height = innerHeight;
+    // Everything is placed around the brackets rather than the codes, so
+    // cards and chips keep clear of both.
+    const items = layout(codes, width, height).map((item) => {
+      const corners = expand(item.points, BRACKET_OFFSET);
+      return { ...item, corners, outer: bounds(corners) };
+    });
+    const boxes = items.map(({ outer }) => boxRect(outer));
+    const layer = el("div", { className: previous?.texts === texts ? "layer still" : "layer" });
+    const svg = svgEl("svg");
+    layer.append(svg);
+    scan.root.append(layer);
+
+    const close = () => {
+      if (!scan.open) return;
+      scan.open.node.remove();
+      scan.open.item.chip.ariaExpanded = "false";
+      scan.open.item.edge.classList.remove("active");
+      scan.open = null;
+    };
+    const open = (item) => {
+      close();
+      const node = card(item.code, null);
+      node.style.visibility = "hidden";
+      layer.append(node);
+      const obstacles = [...boxes, ...items.map(({ chipRect }) => chipRect)];
+      if (placeCards([{ card: node, box: item.outer }], width, height, obstacles)) {
+        node.style.visibility = "";
+        scan.open = { item, node };
+      } else {
+        scan.open = { item, node: sideList([{ card: node, box: item.outer }], width) };
+        scan.root.append(scan.open.node);
+      }
+      item.chip.ariaExpanded = "true";
+      item.edge.classList.add("active");
+    };
+    dismissOn(scan, close);
+
+    for (const item of items) {
+      const d = brackets(item.corners);
+      item.edge = svgEl("path", { class: "edge bracket", d });
+      svg.append(svgEl("path", { class: "halo bracket", d }), item.edge);
+      const { kind, host, text } = item.code;
+      item.chip = el(
+        "button",
+        { className: "chip", type: "button", title: kind === "link" ? host : text.slice(0, 200), ariaExpanded: "false" },
+        kind === "link" ? "Link" : "Text",
+      );
+      item.chip.addEventListener("click", () => (scan.open?.item === item ? close() : open(item)));
+      layer.append(item.chip);
+      item.chipRect = placeChip(item.chip, item.outer, boxes, width, height);
+    }
+
+    // Keep the card that was open before this update, if its code is still here.
+    const reopen = previous?.open && items.find(({ code }) => code.text === previous.open.item.code.text);
+    if (reopen) open(reopen);
+
+    const startX = scrollX;
+    const startY = scrollY;
+    addEventListener(
+      "scroll",
+      (e) => {
+        scan.moved = true;
+        if (e.target === document) {
+          layer.style.transform = `translate(${startX - scrollX}px, ${startY - scrollY}px)`;
+        } else {
+          // Codes inside a scrolled element moved by an unknown amount: hide
+          // the markers until the next scan puts them back.
+          layer.style.visibility = "hidden";
+        }
+      },
+      { capture: true, passive: true, signal: scan.abort.signal },
+    );
+    return true;
+  }
+
+  // Maps each code's corners to CSS pixels and sorts the codes in reading
+  // order: by row, then left to right.
+  function layout(codes, width, height) {
+    return codes
+      .map((code) => {
+        const points = code.corners.map(([x, y]) => [x * width, y * height]);
+        return { code, points, box: bounds(points) };
+      })
+      .sort((a, b) => {
+        const sameRow = Math.abs(a.box.top - b.box.top) < (a.box.bottom - a.box.top) / 2;
+        return sameRow ? a.box.left - b.box.left : a.box.top - b.box.top;
+      });
   }
 
   function card(code, number) {
@@ -345,14 +471,7 @@ globalThis.qrReader = (() => {
         { left: box.left - GAP - w, top: level },
       ]
         .map((p) => ({ ...p, w, h }))
-        .find(
-          (r) =>
-            r.left >= GAP &&
-            r.top >= GAP &&
-            r.left + w <= width - GAP &&
-            r.top + h <= height - GAP &&
-            !taken.some((t) => intersects(t, r)),
-        );
+        .find((r) => onScreen(r, width, height, GAP) && !taken.some((t) => intersects(t, r)));
       if (!spot) return false;
       taken.push(spot);
       card.style.left = `${spot.left}px`;
@@ -361,9 +480,70 @@ globalThis.qrReader = (() => {
     return true;
   }
 
+  // Lists the cards along the side of the screen that covers fewer codes.
+  function sideList(items, width) {
+    const onLeft = items.filter(({ box }) => (box.left + box.right) / 2 < width / 2).length;
+    const side = onLeft > items.length / 2 ? "right" : "left";
+    const list = el("div", { className: `list ${side}` });
+    for (const { card } of items) {
+      card.removeAttribute("style");
+      list.append(card);
+    }
+    return list;
+  }
+
+  // Puts a chip just outside the top-left of a code's brackets, or another
+  // side if that one is off screen or would cover a code. Returns where it went.
+  function placeChip(chip, box, boxes, width, height) {
+    const w = chip.offsetWidth;
+    const h = chip.offsetHeight;
+    const spot = [
+      { left: box.left, top: box.top - h - 6 },
+      { left: box.left, top: box.bottom + 6 },
+      { left: box.left - w - 6, top: box.top },
+      { left: box.right + 6, top: box.top },
+    ]
+      .map((p) => ({ ...p, w, h }))
+      .find((r) => onScreen(r, width, height, 4) && !boxes.some((b) => intersects(b, r))) ?? {
+      left: clamp(box.left, 4, width - w - 4),
+      top: clamp(box.top - h - 6, 4, height - h - 4),
+      w,
+      h,
+    };
+    chip.style.left = `${spot.left}px`;
+    chip.style.top = `${spot.top}px`;
+    return spot;
+  }
+
+  // Moves each corner `distance` pixels further out from the code's center,
+  // which pushes every edge of a square code out by that distance.
+  function expand(points, distance) {
+    const cx = points.reduce((sum, [x]) => sum + x, 0) / points.length;
+    const cy = points.reduce((sum, [, y]) => sum + y, 0) / points.length;
+    return points.map(([x, y]) => {
+      const length = Math.hypot(x - cx, y - cy) || 1;
+      const shift = (distance * Math.SQRT2) / length;
+      return [x + (x - cx) * shift, y + (y - cy) * shift];
+    });
+  }
+
+  // An SVG path with an L-shaped bracket at each corner.
+  function brackets(corners) {
+    return corners
+      .map((p, i) => {
+        const toward = (q) => {
+          const length = Math.hypot(q[0] - p[0], q[1] - p[1]) || 1;
+          const arm = Math.min(16, length * 0.3) / length;
+          return [p[0] + (q[0] - p[0]) * arm, p[1] + (q[1] - p[1]) * arm];
+        };
+        return `M${toward(corners.at(i - 1))} L${p} L${toward(corners[(i + 1) % corners.length])}`;
+      })
+      .join(" ");
+  }
+
   function bar(message, ...extra) {
     const close = el("button", { className: "close", type: "button", ariaLabel: "Close" }, "×");
-    close.addEventListener("click", teardown);
+    close.addEventListener("click", dismiss);
     return el("div", { className: "bar", role: "status" }, el("span", {}, message), ...extra, close);
   }
 
@@ -400,6 +580,12 @@ globalThis.qrReader = (() => {
     return Math.max(min, Math.min(value, max));
   }
 
+  function bounds(points) {
+    const xs = points.map(([x]) => x);
+    const ys = points.map(([, y]) => y);
+    return { left: Math.min(...xs), right: Math.max(...xs), top: Math.min(...ys), bottom: Math.max(...ys) };
+  }
+
   function rect(node) {
     const { left, top, width: w, height: h } = node.getBoundingClientRect();
     return { left, top, w, h };
@@ -409,9 +595,13 @@ globalThis.qrReader = (() => {
     return { left, top, w: right - left, h: bottom - top };
   }
 
+  function onScreen(r, width, height, margin) {
+    return r.left >= margin && r.top >= margin && r.left + r.w <= width - margin && r.top + r.h <= height - margin;
+  }
+
   function intersects(a, b) {
     return a.left < b.left + b.w && b.left < a.left + a.w && a.top < b.top + b.h && b.top < a.top + a.h;
   }
 
-  return { clear, status, show };
+  return { clear, status, show, mark, showingResults, clearMarkers };
 })();

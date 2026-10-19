@@ -1,9 +1,14 @@
 {
   "manifest_version": 3,
   "name": "QR Reader",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Finds QR codes on the page, outlines them, and shows what they contain.",
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "contextMenus", "storage"],
+  "optional_host_permissions": ["<all_urls>"],
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"
