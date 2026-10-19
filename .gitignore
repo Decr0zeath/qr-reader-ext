@@ -1,5 +1,7 @@
 node_modules/
 dist/
+# Copied from node_modules by `npm install` (see scripts/vendor.js).
+extension/vendor/
 *.zip
 *.crx
 *.pem

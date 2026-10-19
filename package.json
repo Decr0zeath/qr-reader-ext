@@ -1,0 +1,14 @@
+{
+  "name": "qr-reader-ext",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chrome extension that detects QR codes on screen and overlays their contents",
+  "type": "module",
+  "scripts": {
+    "postinstall": "node scripts/vendor.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "zxing-wasm": "3.1.4"
+  }
+}
