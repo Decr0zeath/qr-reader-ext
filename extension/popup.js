@@ -1,10 +1,27 @@
 import { getSettings, setAutoScan, setSiteExcluded } from "./lib/settings.js";
 
+const scan = document.getElementById("scan");
+const quickScan = document.getElementById("quick-scan");
 const toggle = document.getElementById("auto-scan");
 const denied = document.getElementById("denied");
 const options = document.getElementById("auto-scan-options");
 const sites = document.getElementById("sites");
 const noSites = document.getElementById("no-sites");
+
+scan.addEventListener("click", async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  await chrome.runtime.sendMessage({ type: "scan", tab: { id: tab.id, windowId: tab.windowId } });
+  // Out of the way of the results.
+  window.close();
+});
+
+// Name the shortcut as it's set in Chrome, which may not be the default.
+chrome.commands.getAll().then((commands) => {
+  const { shortcut } = commands.find((command) => command.name === "scan") ?? {};
+  quickScan.textContent = shortcut
+    ? `To scan without opening this, press ${shortcut}.`
+    : "To scan without opening this, set a shortcut at chrome://extensions/shortcuts.";
+});
 
 async function render() {
   const settings = await getSettings();

@@ -17,19 +17,31 @@ const CAPTURE = { format: "jpeg", quality: 85 };
 // Items in the toolbar icon's right-click menu.
 const MENU = { autoScan: "auto-scan", site: "auto-scan-site" };
 
-// Scanning on click (or the keyboard shortcut).
+// Scanning once: from the popup's button or the keyboard shortcut. Both give
+// access to the tab for a scan.
 
 const scanning = new Set();
 
-chrome.action.onClicked.addListener(async (tab) => {
-  if (scanning.has(tab.id)) return;
+chrome.commands.onCommand.addListener((command, tab) => {
+  if (command === "scan") scanOnce(tab);
+});
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type !== "scan") return;
+  scanOnce(message.tab);
+  // The popup closes once it hears back. Closing sooner can lose the request.
+  sendResponse();
+});
+
+async function scanOnce(tab) {
+  if (!tab || scanning.has(tab.id)) return;
   scanning.add(tab.id);
   try {
     await scan(tab);
   } finally {
     scanning.delete(tab.id);
   }
-});
+}
 
 async function scan(tab) {
   const target = { tabId: tab.id };
@@ -125,7 +137,7 @@ async function autoScan(tabId) {
 }
 
 // The auto-scan setting lives in storage, changed from the menu below or the
-// options page. This keeps the watcher, open tabs and menu in line with it.
+// popup. This keeps the watcher, open tabs and menu in line with it.
 
 let syncing = Promise.resolve();
 function syncAutoScan() {
@@ -187,6 +199,13 @@ chrome.storage.onChanged.addListener(async (changes, area) => {
     await clearBadges((tab) => excluded.includes(siteOf(tab.url)));
     await updateSiteMenu();
   }
+});
+
+chrome.permissions.onAdded.addListener(async () => {
+  // The popup can close when Chrome shows its access prompt, before
+  // it hears the answer. Access to all sites is only ever asked for
+  // auto-scan, so getting it turns auto-scan on.
+  if (await chrome.permissions.contains(ALL_SITES)) await chrome.storage.local.set({ autoScan: true });
 });
 
 chrome.permissions.onRemoved.addListener(async () => {

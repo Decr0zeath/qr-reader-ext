@@ -1,4 +1,4 @@
-// Settings shared by background.js and the options page. watch.js keeps its
+// Settings shared by background.js and the popup. watch.js keeps its
 // own copy of the defaults because content scripts can't import modules.
 export const DEFAULTS = { autoScan: false, videoInterval: 2, excludedSites: [] };
 

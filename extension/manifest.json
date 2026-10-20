@@ -5,16 +5,13 @@
   "description": "Finds QR codes on the page, outlines them, and shows what they contain.",
   "permissions": ["activeTab", "scripting", "contextMenus", "storage"],
   "optional_host_permissions": ["<all_urls>"],
-  "options_ui": {
-    "page": "options.html",
-    "open_in_tab": false
-  },
   "background": {
     "service_worker": "background.js",
     "type": "module"
   },
   "action": {
-    "default_title": "Scan for QR codes",
+    "default_title": "QR Reader\nAlt+Shift+Q to scan",
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -22,7 +19,7 @@
     }
   },
   "commands": {
-    "_execute_action": {
+    "scan": {
       "suggested_key": { "default": "Alt+Shift+Q" },
       "description": "Scan the page for QR codes"
     }
